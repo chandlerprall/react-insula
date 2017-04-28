@@ -18451,7 +18451,20 @@ var createClass = function () {
 
 
 
+var defineProperty = function (obj, key, value) {
+  if (key in obj) {
+    Object.defineProperty(obj, key, {
+      value: value,
+      enumerable: true,
+      configurable: true,
+      writable: true
+    });
+  } else {
+    obj[key] = value;
+  }
 
+  return obj;
+};
 
 var _extends = Object.assign || function (target) {
   for (var i = 1; i < arguments.length; i++) {
@@ -18794,27 +18807,45 @@ var NO_INDEX = -1;
 var ZERO_LENGTH = 0;
 var REMOVE_ONE_ITEM = 1;
 var ONE_BEFORE_LAST_INDEX = -1;
+var FIRST_INDEX = 0;
+var SECOND_INDEX = 1;
 
-function Store(initialState) {
-    this.state = initialState || {};
+function Store(initialState, middleware) {
     this.listeners = {};
     this.subscriptions = new TreeSubscription(this);
     this.eventOptions = this.createEventOptions();
-    
-    // To avoid creating polymorphic function usage of the internal dispatching code
-    // `dispatch` thinly wraps the `internalDispatch` method by first setting
-    // `this.currentPayload`
-    this.currentEventPayload = null;
+    this.middleware = middleware || [];
     
     this.callSubscribers = this.callSubscribers.bind(this);
     this.nextSubscriberCalls = [];
+    
+    this.setState(initialState !== undefined ? initialState : {});
+    
+    // call any middleware constructors
+    this.callMiddleware('constructor');
 }
 
+Store.prototype.callMiddleware = function callMiddleware(type, args) {
+    var currentArgs = args;
+    for (var i = 0; i < this.middleware.length; i++) {
+        var middlewareItem = this.middleware[i];
+        if (middlewareItem.hasOwnProperty(type)) {
+            currentArgs = middlewareItem[type].call(this, currentArgs);
+        }
+    }
+    return currentArgs;
+};
+
 Store.prototype.getState = function getState() {
-    return this.state;
+    return this.callMiddleware('getState', [this.state])[FIRST_INDEX];
 };
 
 Store.prototype.getPartialState = function getPartialState(selector) {
+    var processedSelector = this.callMiddleware('getPartialStateParseSelector', [selector])[FIRST_INDEX];
+    return this.callMiddleware('getPartialStateReturn', [this.accessStateAtSelector(processedSelector)])[FIRST_INDEX];
+};
+
+Store.prototype.accessStateAtSelector = function accessStateAtSelector(selector) {
     var currentValue = this.getState();
     
     for (var i = 0; i < selector.length; i++) {
@@ -18830,11 +18861,19 @@ Store.prototype.getPartialState = function getPartialState(selector) {
 };
 
 Store.prototype.setState = function setState(state) {
-    this.state = state;
+    this.state = this.callMiddleware('setState', [state])[FIRST_INDEX];
     this.callSubscribersUnderSelector([]);
 };
 
 Store.prototype.setPartialState = function setPartialState(selector, value) {
+    var args = this.callMiddleware('setPartialState', [selector, value]);
+    var processedSelector = args[FIRST_INDEX];
+    var processedValue = args[SECOND_INDEX];
+    this.setStateAtSelector(processedSelector, processedValue);
+    this.callSubscribersUnderSelector(processedSelector);
+};
+
+Store.prototype.setStateAtSelector = function setStateAtSelector(selector, value) {
     var lastKey = selector[selector.length + ONE_BEFORE_LAST_INDEX];
     
     var currentValue = this.getState();
@@ -18847,7 +18886,6 @@ Store.prototype.setPartialState = function setPartialState(selector, value) {
     }
     
     currentValue[lastKey] = value;
-    this.callSubscribersUnderSelector(selector);
 };
 
 Store.prototype.on = function on(event, listener) {
@@ -18868,20 +18906,17 @@ Store.prototype.off = function off(event, listener) {
 };
 
 Store.prototype.dispatch = function dispatch(event, payload) {
-    this.currentPayload = payload;
-    this.internalDispatch(event);
-};
-
-Store.prototype.internalDispatch = function internalDispatch(event) {
-    var listeners = this.listeners[event];
+    var processed = this.callMiddleware('dispatch', [event, payload]);
+    var processedEvent = processed[FIRST_INDEX];
+    var processedPayload = processed[SECOND_INDEX];
+    
+    var listeners = this.listeners[processedEvent];
     if (listeners !== undefined) {
-        var payload = this.currentPayload;
         var eventOptions = this.getEventOptions();
         for (var i = 0; i < listeners.length; i++) {
-            listeners[i](payload, eventOptions);
+            listeners[i](processedPayload, eventOptions);
         }
     }
-    this.currentPayload = null;
 };
 
 Store.prototype.createEventOptions = function createEventOptions() {
@@ -18899,25 +18934,29 @@ Store.prototype.getEventOptions = function getEventOptions() {
 };
 
 Store.prototype.subscribeToState = function subscribeToState(selectors, listener) {
+    var processed = this.callMiddleware('subscribeToState', [selectors, listener]);
+    var processedSelectors = processed[FIRST_INDEX];
+    var processedListener = processed[SECOND_INDEX];
+    
     var store = this;
     var stateChangeListener = function() {
         // get state values
         var stateValues = [];
-        for (var i = 0; i < selectors.length; i++) {
-            stateValues.push(store.getPartialState(selectors[i]));
+        for (var i = 0; i < processedSelectors.length; i++) {
+            stateValues.push(store.getPartialState(processedSelectors[i]));
         }
         
         // call listener with all the state values
-        listener(stateValues);
+        processedListener(stateValues);
     };
     
-    for (var i = 0; i < selectors.length; i++) {
-        this.subscriptions.subscribeSelector(selectors[i], stateChangeListener);
+    for (var i = 0; i < processedSelectors.length; i++) {
+        this.subscriptions.subscribeSelector(processedSelectors[i], stateChangeListener);
     }
     
     return function unsubscribeToState() {
-        for (var i = 0; i < selectors.length; i++) {
-            store.subscriptions.unsubscribeSelector(selectors[i], stateChangeListener);
+        for (var i = 0; i < processedSelectors.length; i++) {
+            store.subscriptions.unsubscribeSelector(processedSelectors[i], stateChangeListener);
         }
     };
 };
@@ -18947,6 +18986,8 @@ Store.prototype.callSubscribers = function callSubscribers() {
 var insula$1 = Store;
 
 function connect(selectors, transformer) {
+    var options = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : {};
+
     return function connector(View) {
         var ConnectedComponent = function (_Component) {
             inherits(ConnectedComponent, _Component);
@@ -18963,7 +19004,10 @@ function connect(selectors, transformer) {
                 var _this = possibleConstructorReturn(this, (_ref = ConnectedComponent.__proto__ || Object.getPrototypeOf(ConnectedComponent)).call.apply(_ref, [this].concat(args)));
 
                 _this.store = _this.context.insulaStore;
+                _this.options = options;
+                _this.addedListeners = [];
                 _this.unsubscribeFromState = null;
+                _this.componentRef = null;
 
                 _this.bindDispatch = function (event, payload) {
                     if (payload === undefined) {
@@ -18979,7 +19023,7 @@ function connect(selectors, transformer) {
                 _this.state = transformer(_this.getValuesForSelectors(selectors), _this.transformerOptions);
 
                 _this.onStateUpdate = function (stateValues) {
-                    _this.setState(transformer(stateValues, _this.transformerOptions));
+                    _this.setState(transformer([].concat(toConsumableArray(stateValues), [_this.props]), _this.transformerOptions));
                 };
                 return _this;
             }
@@ -18987,11 +19031,36 @@ function connect(selectors, transformer) {
             createClass(ConnectedComponent, [{
                 key: 'componentDidMount',
                 value: function componentDidMount() {
+                    // add event listeners
+                    var listeners = this.options.listeners;
+
+                    if (listeners != null) {
+                        var events = Object.keys(listeners);
+                        for (var i = 0; i < events.length; i++) {
+                            var event = events[i];
+                            var listener = listeners[event];
+                            var boundListener = listener.bind(this.componentRef);
+                            this.addedListeners.push({ event: event, listener: boundListener });
+                            this.store.on(event, boundListener);
+                        }
+                    }
+
+                    // add state subscriptions
                     this.unsubscribeFromState = this.store.subscribeToState(selectors, this.onStateUpdate);
                 }
             }, {
                 key: 'componentWillUnmount',
                 value: function componentWillUnmount() {
+                    // remove event listeners
+                    for (var i = 0; i < this.addedListeners.length; i++) {
+                        var _addedListeners$i = this.addedListeners[i],
+                            event = _addedListeners$i.event,
+                            listener = _addedListeners$i.listener;
+
+                        this.store.off(event, listener);
+                    }
+
+                    // remove state subscriptions
                     this.unsubscribeFromState();
                     this.unsubscribeFromState = null;
                 }
@@ -19004,13 +19073,21 @@ function connect(selectors, transformer) {
                     for (var i = 0; i < selectors.length; i++) {
                         stateValues.push(store.getPartialState(selectors[i]));
                     }
+                    stateValues.push(this.props);
 
                     return stateValues;
                 }
             }, {
                 key: 'render',
                 value: function render() {
-                    return react.createElement(View, _extends({}, this.props, this.state, { dispatch: this.store.dispatch.bind(this.store) }));
+                    var _this2 = this;
+
+                    return react.createElement(View, _extends({
+                        ref: function ref(_ref2) {
+                            return _this2.componentRef = _ref2;
+                        }
+                    }, this.props, this.state, {
+                        dispatch: this.store.dispatch.bind(this.store) }));
                 }
             }]);
             return ConnectedComponent;
@@ -19023,21 +19100,27 @@ function connect(selectors, transformer) {
     };
 }
 
+var ADD_TODO = 'ADD_TODO';
+var COMPLETE_ITEM = 'COMPLETE_ITEM';
+var UNCOMPLETE_ITEM = 'UNCOMPLETE_ITEM';
+var UPDATE_NEXT_TODO = 'UPDATE_NEXT_TODO';
+
+var _listeners;
+
 function NewTodoInput(_ref) {
-    var dispatch = _ref.dispatch,
-        nextTodo = _ref.nextTodo;
+    var addTodo = _ref.addTodo,
+        nextTodo = _ref.nextTodo,
+        updateTodo = _ref.updateTodo;
 
     return react.createElement(
         'div',
         null,
         react.createElement('input', { type: 'text', value: nextTodo, onChange: function onChange(e) {
-                return dispatch('UPDATE_NEXT_TODO', e.target.value);
+                return updateTodo(e.target.value);
             }, placeholder: 'new todo item' }),
         react.createElement(
             'button',
-            { onClick: function onClick() {
-                    return dispatch('ADD_TODO');
-                } },
+            { onClick: addTodo },
             'add'
         )
     );
@@ -19046,22 +19129,37 @@ function NewTodoInput(_ref) {
 NewTodoInput.displayName = 'NewTodoInput';
 
 NewTodoInput.propTypes = {
-    dispatch: index_7.isRequired,
-    nextTodo: index_16.isRequired
+    addTodo: index_7.isRequired,
+    nextTodo: index_16.isRequired,
+    updateTodo: index_7.isRequired
 };
 
-var NewTodoInput$1 = connect([['nextTodo']], function (_ref2) {
-    var _ref3 = slicedToArray(_ref2, 1),
-        nextTodo = _ref3[0];
+var NewTodoInput$1 = connect([['nextTodo']], function (_ref2, _ref3) {
+    var _ref4 = slicedToArray(_ref2, 1),
+        nextTodo = _ref4[0];
 
-    return { nextTodo: nextTodo };
+    var bindDispatch = _ref3.bindDispatch;
+    return {
+        nextTodo: nextTodo,
+        addTodo: bindDispatch(ADD_TODO, nextTodo),
+        updateTodo: bindDispatch(UPDATE_NEXT_TODO)
+    };
+}, {
+    listeners: (_listeners = {}, defineProperty(_listeners, UPDATE_NEXT_TODO, function (value, _ref5) {
+        var setPartialState = _ref5.setPartialState;
+
+        setPartialState(['nextTodo'], value);
+    }), defineProperty(_listeners, ADD_TODO, function (value, _ref6) {
+        var setPartialState = _ref6.setPartialState;
+
+        setPartialState(['nextTodo'], '');
+    }), _listeners)
 })(NewTodoInput);
 
 function ItemList(_ref) {
     var items = _ref.items,
         showStruckOut = _ref.showStruckOut;
 
-    console.log('rendering', showStruckOut);
     return react.createElement(
         'ul',
         null,
@@ -19087,6 +19185,11 @@ ItemList.propTypes = {
     showStruckOut: index_4.isRequired
 };
 
+var _listeners$1;
+
+var FIRST_INDEX$1 = 0;
+var NEXT_INDEX = 1;
+
 var TodoItems = connect([['todos']], function (_ref, _ref2) {
     var _ref3 = slicedToArray(_ref, 1),
         todos = _ref3[0];
@@ -19096,12 +19199,36 @@ var TodoItems = connect([['todos']], function (_ref, _ref2) {
         items: todos.map(function (text, idx) {
             return {
                 text: text,
-                onClick: bindDispatch('COMPLETE_ITEM', idx)
+                onClick: bindDispatch(COMPLETE_ITEM, idx)
             };
         }),
         showStruckOut: false
     };
+}, {
+    listeners: (_listeners$1 = {}, defineProperty(_listeners$1, ADD_TODO, function (payload, _ref4) {
+        var getPartialState = _ref4.getPartialState,
+            setPartialState = _ref4.setPartialState;
+
+        var newTodos = [].concat(toConsumableArray(getPartialState(['todos'])), [payload]);
+        setPartialState(['todos'], newTodos);
+    }), defineProperty(_listeners$1, COMPLETE_ITEM, function (itemIdx, _ref5) {
+        var getPartialState = _ref5.getPartialState,
+            setPartialState = _ref5.setPartialState;
+
+        var todos = getPartialState(['todos']);
+        var completed = getPartialState(['completed']);
+
+        var completedItem = todos[itemIdx];
+        var newCompleted = [completedItem].concat(toConsumableArray(completed));
+        var newTodos = todos.slice(FIRST_INDEX$1, itemIdx).concat(todos.slice(itemIdx + NEXT_INDEX));
+
+        setPartialState(['todos'], newTodos);
+        setPartialState(['completed'], newCompleted);
+    }), _listeners$1)
 })(ItemList);
+
+var FIRST_INDEX$2 = 0;
+var NEXT_INDEX$1 = 1;
 
 var CompletedItems = connect([['completed']], function (_ref, _ref2) {
     var _ref3 = slicedToArray(_ref, 1),
@@ -19112,49 +19239,13 @@ var CompletedItems = connect([['completed']], function (_ref, _ref2) {
         items: completed.map(function (text, idx) {
             return {
                 text: text,
-                onClick: bindDispatch('UNCOMPLETE_ITEM', idx)
+                onClick: bindDispatch(UNCOMPLETE_ITEM, idx)
             };
         }),
         showStruckOut: true
     };
-})(ItemList);
-
-var eventHandlers = [{
-    event: 'UPDATE_NEXT_TODO',
-    handler: function handler(value, _ref) {
-        var setPartialState = _ref.setPartialState;
-
-        setPartialState(['nextTodo'], value);
-    }
 }, {
-    event: 'ADD_TODO',
-    handler: function handler(payload, _ref2) {
-        var getPartialState = _ref2.getPartialState,
-            setPartialState = _ref2.setPartialState;
-
-        var newTodos = [].concat(toConsumableArray(getPartialState(['todos'])), [getPartialState(['nextTodo'])]);
-        setPartialState(['todos'], newTodos);
-        setPartialState(['nextTodo'], '');
-    }
-}, {
-    event: 'COMPLETE_ITEM',
-    handler: function handler(itemIdx, _ref3) {
-        var getPartialState = _ref3.getPartialState,
-            setPartialState = _ref3.setPartialState;
-
-        var todos = getPartialState(['todos']);
-        var completed = getPartialState(['completed']);
-
-        var completedItem = todos[itemIdx];
-        var newCompleted = [completedItem].concat(toConsumableArray(completed));
-        var newTodos = todos.slice(0, itemIdx).concat(todos.slice(itemIdx + 1));
-
-        setPartialState(['todos'], newTodos);
-        setPartialState(['completed'], newCompleted);
-    }
-}, {
-    event: 'UNCOMPLETE_ITEM',
-    handler: function handler(itemIdx, _ref4) {
+    listeners: defineProperty({}, UNCOMPLETE_ITEM, function (itemIdx, _ref4) {
         var getPartialState = _ref4.getPartialState,
             setPartialState = _ref4.setPartialState;
 
@@ -19163,29 +19254,19 @@ var eventHandlers = [{
 
         var uncompletedItem = completed[itemIdx];
         var newTodos = [uncompletedItem].concat(toConsumableArray(todos));
-        var newCompleted = completed.slice(0, itemIdx).concat(completed.slice(itemIdx + 1));
+        var newCompleted = completed.slice(FIRST_INDEX$2, itemIdx).concat(completed.slice(itemIdx + NEXT_INDEX$1));
 
         setPartialState(['todos'], newTodos);
         setPartialState(['completed'], newCompleted);
-    }
-}];
+    })
+})(ItemList);
 
 /* global document */
-function attachEvents(store) {
-    eventHandlers.forEach(function (_ref) {
-        var event = _ref.event,
-            handler = _ref.handler;
-
-        store.on(event, handler);
-    });
-}
-
 var store = new insula$1({
     nextTodo: '',
     todos: ['make application pretty'],
     completed: ['make todo app']
 });
-attachEvents(store);
 
 index$3.render(react.createElement(
     StoreComponent,
